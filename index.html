@@ -37,10 +37,9 @@
             gap: 10px;
             align-items: center;
             width: 90%;
-            pointer-events: none; /* 下のタップを邪魔しない */
+            pointer-events: none; 
         }
 
-        /* ボタン等のUI要素はタップできるようにする */
         .ui-element {
             pointer-events: auto;
         }
@@ -113,7 +112,7 @@
         import * as THREE from 'three';
         import { ARButton } from 'three/addons/webxr/ARButton.js';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-        import { VRM, VRMUtils } from '@pixiv/three-vrm';
+        import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
         let camera, scene, renderer;
         let reticle; 
@@ -124,7 +123,6 @@
         // あなたのVRMファイルを読み込むURL
         const vrmUrl = 'https://raw.githubusercontent.com/Onocul/AR-shikatsun/main/shikatsun.vrm';
 
-        // スマホ画面にエラーを出すための関数
         function showLog(message) {
             const logDiv = document.getElementById('debug-log');
             logDiv.style.display = 'block';
@@ -200,11 +198,15 @@
                 document.getElementById('info-text').innerText = 'モデルを読み込み中...';
                 
                 const loader = new GLTFLoader();
+                
+                // 【超重要】GLTFLoaderにVRMを解析するプラグインを登録！
+                loader.register((parser) => new VRMLoaderPlugin(parser));
+
                 loader.load(vrmUrl, async (gltf) => {
                     try {
                         VRMUtils.removeUnnecessaryJoints(gltf.scene);
                         
-                        // 【ここを修正！】最新のthree-vrm規格に合わせた安全な読み込み
+                        // プラグインのおかげで、ここからVRMデータが正しく取り出せるようになります
                         const vrm = gltf.userData.vrm;
                         if (!vrm) {
                             showLog('エラー: GLTFファイル内にVRMデータが見つかりません');
