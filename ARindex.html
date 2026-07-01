@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WebXR VRM Pose AR</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; font-family: sans-serif; }
+        /* ARモード中に上に重なるUIのスタイル */
+        #overlay-ui {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            display: none; /* AR開始前は非表示 */
+            flex-direction: column;
+            gap: 10px;
+            align-items: center;
+            width: 90%;
+        }
+        .btn {
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border: 2px solid white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        #pose-options {
+            display: flex;
+            gap: 10px;
+        }
+        #info-text {
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            text-align: center;
+        }
+    </style>
+    <!-- 三大ライブラリ（Three.js, GLTFLoader, three-vrm）を読み込み -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <!-- AR画面に覆いかぶさるUI -->
+    <div id="overlay-ui">
+        <div id="info-text">床をスキャンして画面をタップし、モデルを設置してください</div>
+        <div id="pose-options" style="display: none;">
+            <button class="btn" id="btn-pose1">ポーズ1（手を上げる）</button>
+            <button class="btn" id="btn-pose2">ポーズ2（気をつけ）</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { VRM, VRMUtils } from '@pixiv/three-vrm';
+
+        let camera, scene, renderer;
+        let reticle; // 床を認識したときに出る丸いガイドマーカー
+        let currentVrm = null;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        // 【※重要】テスト用のサンプルVRMモデル（公式のアバター）。自分のVRMのURLに差し替え可能です。
+        const vrmUrl = 'https://pixiv.github.io/three-vrm/packages/three-vrm/examples/models/VRM1_Self_Introduction_Sample_A.vrm';
+
+        init();
+
+        async function init() {
+            // 1. シーンとカメラの準備
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            // 光源の設定
+            const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2.5);
+            light.position.set(0.5, 1, 0.25);
+            scene.add(light);
+
+            // 2. レンダラーの設定（WebXRを有効化）
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true; // WebXR（AR）モードをON
+            document.body.appendChild(renderer.domElement);
+
+            // 3. AR起動ボタンの設置（床認識機能とUI重ね合わせ機能をリクエスト）
+            const overlayContainer = document.getElementById('overlay-ui');
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'],
+                domOverlay: { root: overlayContainer }
+            });
+            document.body.appendChild(arButton);
+
+            // ARセッションが始まったらUIを表示する
+            renderer.xr.addEventListener('sessionstart', () => {
+                overlayContainer.style.display = 'flex';
+            });
+
+            // 4. 床を指し示すマーカー（レティクル）の作成
+            reticle = new THREE.Mesh(
+                new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            // 5. 画面タップ（トリガー）時の処理：モデルを置く
+            const controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onPlaceModel);
+            scene.add(controller);
+
+            // UIボタンのイベント登録
+            document.getElementById('btn-pose1').addEventListener('click', () => applyPose(1));
+            document.getElementById('btn-pose2').addEventListener('click', () => applyPose(2));
+
+            window.addEventListener('resize', onWindowResize);
+            
+            // ループアニメーション開始
+            renderer.setAnimationLoop(renderLoop);
+        }
+
+        // 画面をタップしてモデルを設置・移動する処理
+        async function onPlaceModel() {
+            if (!reticle.visible) return;
+
+            // すでにモデルがいる場合は位置を移動、ない場合は新規読み込み
+            if (currentVrm) {
+                reticle.matrix.decompose(currentVrm.scene.position, currentVrm.scene.quaternion, currentVrm.scene.scale);
+            } else {
+                document.getElementById('info-text').innerText = 'モデルを読み込み中...';
+                
+                const loader = new GLTFLoader();
+                loader.load(vrmUrl, async (gltf) => {
+                    // VRMの不要な関節をクリーンアップして読み込み
+                    VRMUtils.removeUnnecessaryJoints(gltf.scene);
+                    const vrm = await VRM.from(gltf);
+                    currentVrm = vrm;
+
+                    // マーカーの位置にモデルを配置
+                    reticle.matrix.decompose(vrm.scene.position, vrm.scene.quaternion, vrm.scene.scale);
+                    
+                    // モデルを少し小さめに調整（1.0だと現実世界で等身大になり大きすぎる場合があるため、0.6倍に）
+                    vrm.scene.scale.set(0.6, 0.6, 0.6); 
+                    
+                    scene.add(vrm.scene);
+
+                    // セット完了したらポーズボタンを表示
+                    document.getElementById('info-text').innerText = '設置完了！ポーズを選んでね';
+                    document.getElementById('pose-options').style.display = 'flex';
+                }, 
+                (progress) => {}, 
+                (error) => { console.error(error); document.getElementById('info-text').innerText = 'エラーが発生しました'; });
+            }
+        }
+
+        // ポーズを制御する関数
+        function applyPose(poseId) {
+            if (!currentVrm) return;
+
+            // 各関節（ボーン）を取得
+            const leftShoulder = currentVrm.humanoid.getRawBoneNode('leftUpperArm');
+            const rightShoulder = currentVrm.humanoid.getRawBoneNode('rightUpperArm');
+
+            if (poseId === 1) {
+                // ポーズ1: 両手を大きく上げる
+                if (leftShoulder) leftShoulder.rotation.z = 2.0;
+                if (rightShoulder) rightShoulder.rotation.z = -2.0;
+            } else if (poseId === 2) {
+                // ポーズ2: 気をつけ（回転をゼロに戻す）
+                if (leftShoulder) leftShoulder.rotation.z = 0;
+                if (rightShoulder) rightShoulder.rotation.z = 0;
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 毎フレーム走る描画ループ（ここで床のヒットテストを行っている）
+        function renderLoop(timestamp, frame) {
+            if (frame) {
+                const referenceSpace = renderer.xr.getReferenceSpace();
+                const session = renderer.xr.getSession();
+
+                // 初回のみヒットテストのソースを要求
+                if (hitTestSourceRequested === false) {
+                    session.requestReferenceSpace('viewer').then((viewerSpace) => {
+                        session.requestHitTestSource({ space: viewerSpace }).then((source) => {
+                            hitTestSource = source;
+                        });
+                    });
+                    session.addEventListener('end', () => {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                    });
+                    hitTestSourceRequested = true;
+                }
+
+                // 床の解析結果を元にマーカー（レティクル）の位置を更新
+                if (hitTestSource) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    if (hitTestResults.length > 0) {
+                        const hit = hitTestResults[0];
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                    } else {
+                        reticle.visible = false;
+                    }
+                }
+            }
+
+            // VRMの内部アップデート（揺れモノなどの更新）
+            if (currentVrm) {
+                currentVrm.update(0.016); // 60fps想定の経過時間
+            }
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
