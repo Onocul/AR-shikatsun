@@ -3,18 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>WebXR VRM Pose AR</title>
+    <title>WebXR VRM Simple AR</title>
     <style>
-        /* 背景を完全に透明化してカメラ映像を映す */
+        /* 背景を完全に透明化 */
         html, body { 
             margin: 0; 
             padding: 0; 
             overflow: hidden; 
-            font-family: sans-serif; 
             background-color: transparent !important; 
         }
-        
-        /* 3Dを描画するキャンバスを最背面に配置 */
         canvas {
             position: absolute;
             top: 0;
@@ -24,49 +21,7 @@
             z-index: 1;
             background: transparent !important;
         }
-
-        /* ARモード中に上に重なるUI（最前面に配置） */
-        #overlay-ui {
-            position: absolute;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 100;
-            display: none; 
-            flex-direction: column;
-            gap: 10px;
-            align-items: center;
-            width: 90%;
-            pointer-events: none; 
-        }
-
-        .ui-element {
-            pointer-events: auto;
-        }
-
-        .btn {
-            background: rgba(0, 0, 0, 0.7);
-            color: white;
-            border: 2px solid white;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-        #pose-options {
-            display: flex;
-            gap: 10px;
-        }
-        #info-text {
-            color: white;
-            background: rgba(0,0,0,0.5);
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 14px;
-            text-align: center;
-        }
-
-        /* デバッグ用ログ表示エリア */
+        /* エラーが起きた時だけ画面上に赤く出す */
         #debug-log {
             position: absolute;
             top: 10px;
@@ -83,7 +38,6 @@
             white-space: pre-wrap;
         }
     </style>
-    <!-- 三大ライブラリ（Three.js, GLTFLoader, three-vrm）を読み込み -->
     <script type="importmap">
         {
             "imports": {
@@ -96,17 +50,7 @@
 </head>
 <body>
 
-    <!-- エラー表示用エリア -->
     <div id="debug-log"></div>
-
-    <!-- AR画面に覆いかぶさるUI -->
-    <div id="overlay-ui">
-        <div id="info-text" class="ui-element">床をスキャンして画面をタップし、モデルを設置してください</div>
-        <div id="pose-options" class="ui-element" style="display: none;">
-            <button class="btn" id="btn-pose1">ポーズ1（手を上げる）</button>
-            <button class="btn" id="btn-pose2">ポーズ2（気をつけ）</button>
-        </div>
-    </div>
 
     <script type="module">
         import * as THREE from 'three';
@@ -120,7 +64,6 @@
         let hitTestSource = null;
         let hitTestSourceRequested = false;
 
-        // あなたのVRMファイルを読み込むURL
         const vrmUrl = 'https://raw.githubusercontent.com/Onocul/AR-shikatsun/main/shikatsun.vrm';
 
         function showLog(message) {
@@ -144,28 +87,18 @@
                 light.position.set(0.5, 1, 0.25);
                 scene.add(light);
 
-                renderer = new THREE.WebGLRenderer({ 
-                    antialias: true, 
-                    alpha: true,
-                    preserveDrawingBuffer: true 
-                });
+                renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
                 renderer.setPixelRatio(window.devicePixelRatio);
                 renderer.setSize(window.innerWidth, window.innerHeight);
                 renderer.setClearColor(0x000000, 0); 
                 renderer.xr.enabled = true; 
                 document.body.appendChild(renderer.domElement);
 
-                const overlayContainer = document.getElementById('overlay-ui');
+                // 【ここが最大の変更点】バグの原因になるdomOverlay（UI重ね合わせ）を一切要求しない
                 const arButton = ARButton.createButton(renderer, {
-                    requiredFeatures: ['hit-test'],
-                    optionalFeatures: ['dom-overlay'],
-                    domOverlay: { root: overlayContainer }
+                    requiredFeatures: ['hit-test']
                 });
                 document.body.appendChild(arButton);
-
-                renderer.xr.addEventListener('sessionstart', () => {
-                    overlayContainer.style.display = 'flex';
-                });
 
                 reticle = new THREE.Mesh(
                     new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
@@ -178,9 +111,6 @@
                 const controller = renderer.xr.getController(0);
                 controller.addEventListener('select', onPlaceModel);
                 scene.add(controller);
-
-                document.getElementById('btn-pose1').addEventListener('click', (e) => { e.stopPropagation(); applyPose(1); });
-                document.getElementById('btn-pose2').addEventListener('click', (e) => { e.stopPropagation(); applyPose(2); });
 
                 window.addEventListener('resize', onWindowResize);
                 renderer.setAnimationLoop(renderLoop);
@@ -195,56 +125,31 @@
             if (currentVrm) {
                 reticle.matrix.decompose(currentVrm.scene.position, currentVrm.scene.quaternion, currentVrm.scene.scale);
             } else {
-                document.getElementById('info-text').innerText = 'モデルを読み込み中...';
-                
                 const loader = new GLTFLoader();
-                
-                // 【超重要】GLTFLoaderにVRMを解析するプラグインを登録！
                 loader.register((parser) => new VRMLoaderPlugin(parser));
 
                 loader.load(vrmUrl, async (gltf) => {
                     try {
                         VRMUtils.removeUnnecessaryJoints(gltf.scene);
-                        
-                        // プラグインのおかげで、ここからVRMデータが正しく取り出せるようになります
                         const vrm = gltf.userData.vrm;
                         if (!vrm) {
-                            showLog('エラー: GLTFファイル内にVRMデータが見つかりません');
+                            showLog('VRMデータ空っぽ');
                             return;
                         }
                         currentVrm = vrm;
 
                         reticle.matrix.decompose(vrm.scene.position, vrm.scene.quaternion, vrm.scene.scale);
-                        vrm.scene.scale.set(0.6, 0.6, 0.6); 
+                        vrm.scene.scale.set(0.5, 0.5, 0.5); // 少し小さめに設置
                         
                         scene.add(vrm.scene);
-
-                        document.getElementById('info-text').innerText = '設置完了！ポーズを選んでね';
-                        document.getElementById('pose-options').style.display = 'flex';
                     } catch (vrmErr) {
-                        showLog(`VRM変換失敗: ${vrmErr.message}`);
+                        showLog(`変換失敗: ${vrmErr.message}`);
                     }
                 }, 
-                (progress) => {}, 
+                null, 
                 (error) => { 
-                    showLog(`ファイル読み込み失敗: ${error.message || 'URLエラー'}`);
-                    document.getElementById('info-text').innerText = '読み込みエラーが発生しました'; 
+                    showLog(`DL失敗: ${error.message}`);
                 });
-            }
-        }
-
-        function applyPose(poseId) {
-            if (!currentVrm) return;
-
-            const leftShoulder = currentVrm.humanoid.getRawBoneNode('leftUpperArm');
-            const rightShoulder = currentVrm.humanoid.getRawBoneNode('rightUpperArm');
-
-            if (poseId === 1) {
-                if (leftShoulder) leftShoulder.rotation.z = 2.0;
-                if (rightShoulder) rightShoulder.rotation.z = -2.0;
-            } else if (poseId === 2) {
-                if (leftShoulder) leftShoulder.rotation.z = 0;
-                if (rightShoulder) rightShoulder.rotation.z = 0;
             }
         }
 
