@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>WebXR VRM Simple AR</title>
+    <title>WebXR VRM Perfect AR</title>
     <style>
-        /* 背景を完全に透明化 */
+        /* 背景を完全に透明化してカメラ映像を映す */
         html, body { 
             margin: 0; 
             padding: 0; 
@@ -21,7 +21,31 @@
             z-index: 1;
             background: transparent !important;
         }
-        /* エラーが起きた時だけ画面上に赤く出す */
+
+        /* 【新設計】WebXRと競合しない、画面の最前面に固定するボタンエリア */
+        #ui-container {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 9999; /* 何があっても一番上に表示 */
+            display: none; /* AR開始前は隠す */
+            gap: 15px;
+        }
+
+        .btn {
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            border: 2px solid #00ff00; /* 認識リングとお揃いの緑 */
+            padding: 14px 20px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        /* エラーが起きた時だけ出すエリア */
         #debug-log {
             position: absolute;
             top: 10px;
@@ -33,7 +57,7 @@
             font-family: monospace;
             font-size: 12px;
             border-radius: 5px;
-            z-index: 200;
+            z-index: 10000;
             display: none;
             white-space: pre-wrap;
         }
@@ -51,6 +75,11 @@
 <body>
 
     <div id="debug-log"></div>
+
+    <div id="ui-container">
+        <button class="btn" id="btn-pose1">🙌 バンザイ</button>
+        <button class="btn" id="btn-pose2">🧍 気をつけ</button>
+    </div>
 
     <script type="module">
         import * as THREE from 'three';
@@ -94,11 +123,19 @@
                 renderer.xr.enabled = true; 
                 document.body.appendChild(renderer.domElement);
 
-                // 【ここが最大の変更点】バグの原因になるdomOverlay（UI重ね合わせ）を一切要求しない
+                // 安全にARを起動（エラーの起きやすいdomOverlayは使わない方式を維持）
                 const arButton = ARButton.createButton(renderer, {
                     requiredFeatures: ['hit-test']
                 });
                 document.body.appendChild(arButton);
+
+                // ARが始まったら、HTML独自の仕組みでボタンをフワッと画面に出す
+                renderer.xr.addEventListener('sessionstart', () => {
+                    document.getElementById('ui-container').style.display = 'flex';
+                });
+                renderer.xr.addEventListener('sessionend', () => {
+                    document.getElementById('ui-container').style.display = 'none';
+                });
 
                 reticle = new THREE.Mesh(
                     new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
@@ -112,6 +149,13 @@
                 controller.addEventListener('select', onPlaceModel);
                 scene.add(controller);
 
+                // ボタンを押したときにポーズが変わるイベント（タップが突き抜けない対策済）
+                document.getElementById('btn-pose1').addEventListener('beforexrselect', (e) => e.preventDefault());
+                document.getElementById('btn-pose1').addEventListener('click', (e) => { e.stopPropagation(); applyPose(1); });
+                
+                document.getElementById('btn-pose2').addEventListener('beforexrselect', (e) => e.preventDefault());
+                document.getElementById('btn-pose2').addEventListener('click', (e) => { e.stopPropagation(); applyPose(2); });
+
                 window.addEventListener('resize', onWindowResize);
                 renderer.setAnimationLoop(renderLoop);
             } catch (err) {
@@ -119,7 +163,9 @@
             }
         }
 
-        async function onPlaceModel() {
+        async function onPlaceModel(e) {
+            // タップした場所がUIボタンの上なら、モデルの設置処理を無視する（バグ防止）
+            if (e && e.target && e.target.tagName === 'BUTTON') return;
             if (!reticle.visible) return;
 
             if (currentVrm) {
@@ -132,24 +178,36 @@
                     try {
                         VRMUtils.removeUnnecessaryJoints(gltf.scene);
                         const vrm = gltf.userData.vrm;
-                        if (!vrm) {
-                            showLog('VRMデータ空っぽ');
-                            return;
-                        }
+                        if (!vrm) return;
                         currentVrm = vrm;
 
                         reticle.matrix.decompose(vrm.scene.position, vrm.scene.quaternion, vrm.scene.scale);
-                        vrm.scene.scale.set(0.5, 0.5, 0.5); // 少し小さめに設置
+                        vrm.scene.scale.set(0.5, 0.5, 0.5); 
                         
                         scene.add(vrm.scene);
                     } catch (vrmErr) {
                         showLog(`変換失敗: ${vrmErr.message}`);
                     }
-                }, 
-                null, 
-                (error) => { 
-                    showLog(`DL失敗: ${error.message}`);
-                });
+                }, null, null);
+            }
+        }
+
+        // ポーズを動かす処理
+        function applyPose(poseId) {
+            if (!currentVrm) return;
+
+            // 肩の関節を取得
+            const leftShoulder = currentVrm.humanoid.getRawBoneNode('leftUpperArm');
+            const rightShoulder = currentVrm.humanoid.getRawBoneNode('rightUpperArm');
+
+            if (poseId === 1) {
+                // ポーズ1: バンザイ
+                if (leftShoulder) leftShoulder.rotation.z = 2.3;
+                if (rightShoulder) rightShoulder.rotation.z = -2.3;
+            } else if (poseId === 2) {
+                // ポーズ2: 気をつけ
+                if (leftShoulder) leftShoulder.rotation.z = 0;
+                if (rightShoulder) rightShoulder.rotation.z = 0;
             }
         }
 
