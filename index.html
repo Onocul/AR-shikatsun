@@ -22,30 +22,32 @@
             background: transparent !important;
         }
 
-        /* 【新設計】WebXRと競合しない、画面の最前面に固定するボタンエリア */
-        #ui-container {
-            position: fixed;
+        /* 【重要】ARの画面に公式に重ね合わせるコンテナの設定 */
+        #overlay-ui {
+            position: absolute;
             bottom: 30px;
             left: 50%;
             transform: translateX(-50%);
-            z-index: 9999; /* 何があっても一番上に表示 */
+            z-index: 9999;
             display: none; /* AR開始前は隠す */
             gap: 15px;
+            pointer-events: none; /* 下のレイヤーへのタップを邪魔しない */
         }
 
         .btn {
             background: rgba(0, 0, 0, 0.8);
             color: white;
-            border: 2px solid #00ff00; /* 認識リングとお揃いの緑 */
+            border: 2px solid #00ff00;
             padding: 14px 20px;
             border-radius: 10px;
             font-size: 16px;
             font-weight: bold;
             cursor: pointer;
             box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            pointer-events: auto; /* ボタン自体はタップできるようにする */
         }
 
-        /* エラーが起きた時だけ出すエリア */
+        /* エラーログ用 */
         #debug-log {
             position: absolute;
             top: 10px;
@@ -76,7 +78,7 @@
 
     <div id="debug-log"></div>
 
-    <div id="ui-container">
+    <div id="overlay-ui">
         <button class="btn" id="btn-pose1">🙌 バンザイ</button>
         <button class="btn" id="btn-pose2">🧍 気をつけ</button>
     </div>
@@ -123,18 +125,21 @@
                 renderer.xr.enabled = true; 
                 document.body.appendChild(renderer.domElement);
 
-                // 安全にARを起動（エラーの起きやすいdomOverlayは使わない方式を維持）
+                // 【修正ポイント】公式のdomOverlay機能を使って、ボタンのレイヤーをAR画面の上に確実に重ねる
+                const overlayContainer = document.getElementById('overlay-ui');
                 const arButton = ARButton.createButton(renderer, {
-                    requiredFeatures: ['hit-test']
+                    requiredFeatures: ['hit-test'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: overlayContainer }
                 });
                 document.body.appendChild(arButton);
 
-                // ARが始まったら、HTML独自の仕組みでボタンをフワッと画面に出す
+                // ARが始まったら、重ね合わせたUIをflex表示にする
                 renderer.xr.addEventListener('sessionstart', () => {
-                    document.getElementById('ui-container').style.display = 'flex';
+                    overlayContainer.style.display = 'flex';
                 });
                 renderer.xr.addEventListener('sessionend', () => {
-                    document.getElementById('ui-container').style.display = 'none';
+                    overlayContainer.style.display = 'none';
                 });
 
                 reticle = new THREE.Mesh(
@@ -149,11 +154,8 @@
                 controller.addEventListener('select', onPlaceModel);
                 scene.add(controller);
 
-                // ボタンを押したときにポーズが変わるイベント（タップが突き抜けない対策済）
-                document.getElementById('btn-pose1').addEventListener('beforexrselect', (e) => e.preventDefault());
+                // ボタンを押したときにポーズが変わるイベント
                 document.getElementById('btn-pose1').addEventListener('click', (e) => { e.stopPropagation(); applyPose(1); });
-                
-                document.getElementById('btn-pose2').addEventListener('beforexrselect', (e) => e.preventDefault());
                 document.getElementById('btn-pose2').addEventListener('click', (e) => { e.stopPropagation(); applyPose(2); });
 
                 window.addEventListener('resize', onWindowResize);
@@ -164,8 +166,6 @@
         }
 
         async function onPlaceModel(e) {
-            // タップした場所がUIボタンの上なら、モデルの設置処理を無視する（バグ防止）
-            if (e && e.target && e.target.tagName === 'BUTTON') return;
             if (!reticle.visible) return;
 
             if (currentVrm) {
@@ -192,20 +192,16 @@
             }
         }
 
-        // ポーズを動かす処理
         function applyPose(poseId) {
             if (!currentVrm) return;
 
-            // 肩の関節を取得
             const leftShoulder = currentVrm.humanoid.getRawBoneNode('leftUpperArm');
             const rightShoulder = currentVrm.humanoid.getRawBoneNode('rightUpperArm');
 
             if (poseId === 1) {
-                // ポーズ1: バンザイ
                 if (leftShoulder) leftShoulder.rotation.z = 2.3;
                 if (rightShoulder) rightShoulder.rotation.z = -2.3;
             } else if (poseId === 2) {
-                // ポーズ2: 気をつけ
                 if (leftShoulder) leftShoulder.rotation.z = 0;
                 if (rightShoulder) rightShoulder.rotation.z = 0;
             }
