@@ -1,239 +1,137 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>WebXR VRM Anime AR</title>
-    <style>
-        html, body { 
-            margin: 0; 
-            padding: 0; 
-            overflow: hidden; 
-            background-color: transparent !important; 
-        }
-        canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: 1;
-            background: transparent !important;
-        }
-        #debug-log {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            right: 10px;
-            background: rgba(255, 0, 0, 0.8);
-            color: white;
-            padding: 10px;
-            font-family: monospace;
-            font-size: 12px;
-            border-radius: 5px;
-            z-index: 200;
-            display: none;
-            white-space: pre-wrap;
-        }
-    </style>
-    <script type="importmap">
-        {
-            "imports": {
-                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
-                "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@2.1.0/lib/three-vrm.module.js"
-            }
-        }
-    </script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VRM AR Camera - Pose Test</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#202535;color:white;font-family:system-ui,sans-serif}canvas{display:block;position:absolute;inset:0;width:100%;height:100%}#ui{position:absolute;z-index:10;left:0;right:0;bottom:0;padding:12px 12px max(18px,env(safe-area-inset-bottom));background:linear-gradient(transparent,rgba(0,0,0,.85) 25%)}#status{font-size:12px;margin:0 0 8px;text-align:center;white-space:pre-wrap}#poses{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}button{border:0;border-radius:12px;padding:12px 3px;background:#fff;color:#222;font-size:14px;font-weight:700}button.active{background:#8de4ff}#help{font-size:12px;line-height:1.5;text-align:center;margin:9px 0 0;color:#e1e1e1}#ar-slot{position:absolute;z-index:11;top:14px;right:12px}#ar-slot button{position:static!important;transform:none!important;margin:0!important;padding:12px!important;min-width:110px!important;border-radius:12px!important}#log{position:absolute;z-index:12;top:68px;left:10px;right:10px;max-height:28vh;overflow:auto;white-space:pre-wrap;font:11px/1.5 monospace;background:#4a1515e0;border-radius:8px;padding:8px;display:none}#preview-label{position:absolute;top:18px;left:12px;z-index:9;background:#0009;border-radius:7px;padding:7px;font-size:12px}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://esm.sh/three@0.160.0","three/addons/":"https://esm.sh/three@0.160.0/examples/jsm/","@pixiv/three-vrm":"https://esm.sh/@pixiv/three-vrm@2.1.0?external=three"}}
+</script>
 </head>
 <body>
+<div id="preview-label">プレビュー（AR未起動）</div>
+<div id="ar-slot"></div>
+<div id="log"></div>
+<div id="ui">
+<p id="status">モデル読み込み中…</p>
+<div id="poses"><button data-pose="stand" class="active">立つ</button><button data-pose="peace">ピース</button><button data-pose="sit">座る</button><button data-pose="wave">手を振る</button></div>
+<p id="help">AR未起動でもポーズ確認OK。AR起動後は地面をゆっくり映してタップで配置。</p>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import {ARButton} from 'three/addons/webxr/ARButton.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {VRMLoaderPlugin,VRMUtils} from '@pixiv/three-vrm';
 
-    <div id="debug-log"></div>
+const MODEL_URL='https://raw.githubusercontent.com/Onocul/AR-shikatsun/main/shikatsun.vrm';
+const status=document.querySelector('#status'), logBox=document.querySelector('#log'), label=document.querySelector('#preview-label');
+function message(s){status.textContent=s}
+function error(s){logBox.style.display='block';logBox.textContent+=s+'\n';message(s)}
+window.addEventListener('error',e=>error('JS: '+e.message));
+window.addEventListener('unhandledrejection',e=>error('Promise: '+(e.reason?.message||e.reason)));
 
-    <script type="module">
-        import * as THREE from 'three';
-        import { ARButton } from 'three/addons/webxr/ARButton.js';
-        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-        import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,.01,100);
+camera.position.set(0,1.2,3);
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+renderer.setClearColor(0,0);renderer.xr.enabled=true;document.body.prepend(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff,0x8899bb,2.2));
+const light=new THREE.DirectionalLight(0xffffff,1.3);light.position.set(1,3,2);scene.add(light);
+const grid=new THREE.GridHelper(6,12,0x5e738b,0x3c4658);scene.add(grid);
+let vrm=null, modelRoot=null, currentPose='stand', placed=false, loading=true;
+let hitTestSource=null,hitTestRequested=false;
+const reticle=new THREE.Mesh(new THREE.RingGeometry(.09,.12,32).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0x5effad,side:THREE.DoubleSide}));
+reticle.matrixAutoUpdate=false;reticle.visible=false;scene.add(reticle);
 
-        let camera, scene, renderer;
-        let reticle; 
-        let currentVrm = null;
-        let hitTestSource = null;
-        let hitTestSourceRequested = false;
+const loader=new GLTFLoader();loader.register(parser=>new VRMLoaderPlugin(parser));
+loader.load(MODEL_URL,gltf=>{
+ try{
+ vrm=gltf.userData.vrm;
+ if(!vrm)throw new Error('VRMデータがありません');
+ VRMUtils.removeUnnecessaryJoints(gltf.scene);
+ modelRoot=vrm.scene;scene.add(modelRoot);
+ modelRoot.position.set(0,0,0);modelRoot.scale.setScalar(.75);
+ // three-vrm 0.x向け正面補正。モデルの向きによっては変更が必要。
+ VRMUtils.rotateVRM0(vrm);
+ applyPose(currentPose);
+ loading=false;message('読み込み完了！ ポーズを選んでみてね');
+ }catch(e){error('モデル設定失敗: '+e.message)}
+},undefined,e=>{loading=false;error('VRM読込失敗: '+e.message)});
 
-        // アニメーション再生中かどうかを判定するフラグ
-        let isWaving = false;
+// normalized boneを使い、モデル間の骨軸差をできるだけ吸収する。
+const bone=name=>vrm?.humanoid?.getNormalizedBoneNode(name);
+const boneNames=['hips','spine','chest','upperChest','neck','head','leftShoulder','rightShoulder','leftUpperArm','rightUpperArm','leftLowerArm','rightLowerArm','leftUpperLeg','rightUpperLeg','leftLowerLeg','rightLowerLeg','leftHand','rightHand'];
+function applyPose(name){
+ currentPose=name;
+ document.querySelectorAll('[data-pose]').forEach(b=>b.classList.toggle('active',b.dataset.pose===name));
+ if(!vrm)return;
+ // 直前の姿勢が残らないよう正規化ボーンをリセット
+ for(const n of boneNames){const b=bone(n);if(b){b.quaternion.identity()}}
+ // 値はモデルの向きによって微調整が必要。静止ポーズ用。
+ const rotate=(n,x=0,y=0,z=0)=>{const b=bone(n);if(b)b.rotation.set(x,y,z)};
+ if(name==='peace'){
+  rotate('rightUpperArm',-.25,0,-1.05);rotate('rightLowerArm',-.25,0,-.8);
+  rotate('rightHand',0,0,-.15);
+ }else if(name==='wave'){
+  rotate('rightUpperArm',0,0,-2.2);rotate('rightLowerArm',0,0,-.65);
+ }else if(name==='sit'){
+  rotate('leftUpperLeg',-1.2,0,0);rotate('rightUpperLeg',-1.2,0,0);
+  rotate('leftLowerLeg',1.25,0,0);rotate('rightLowerLeg',1.25,0,0);
+  rotate('spine',.12,0,0);
+ }
+ // VRM更新で正規化姿勢を実ボーンに反映
+ vrm.update(0);
+ message('ポーズ: '+({stand:'立つ',peace:'ピース（腕のみ・指は未対応）',sit:'座る',wave:'手を振る（静止）'}[name]));
+}
+document.querySelectorAll('[data-pose]').forEach(b=>b.addEventListener('click',()=>applyPose(b.dataset.pose)));
 
-        const vrmUrl = 'https://raw.githubusercontent.com/Onocul/AR-shikatsun/main/shikatsun.vrm';
-
-        function showLog(message) {
-            const logDiv = document.getElementById('debug-log');
-            logDiv.style.display = 'block';
-            logDiv.innerText += message + '\n';
-        }
-
-        window.addEventListener('error', (e) => {
-            showLog(`エラー: ${e.message}`);
-        });
-
-        init();
-
-        async function init() {
-            try {
-                scene = new THREE.Scene();
-                camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-
-                const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 2.5);
-                light.position.set(0.5, 1, 0.25);
-                scene.add(light);
-
-                renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-                renderer.setPixelRatio(window.devicePixelRatio);
-                renderer.setSize(window.innerWidth, window.innerHeight);
-                renderer.setClearColor(0x000000, 0); 
-                renderer.xr.enabled = true; 
-                document.body.appendChild(renderer.domElement);
-
-                // エラーの出ない最も安全なAR起動設定
-                const arButton = ARButton.createButton(renderer, {
-                    requiredFeatures: ['hit-test']
-                });
-                document.body.appendChild(arButton);
-
-                reticle = new THREE.Mesh(
-                    new THREE.RingGeometry(0.1, 0.13, 32).rotateX(-Math.PI / 2),
-                    new THREE.MeshBasicMaterial({ color: 0x00ff00 })
-                );
-                reticle.matrixAutoUpdate = false;
-                reticle.visible = false;
-                scene.add(reticle);
-
-                const controller = renderer.xr.getController(0);
-                controller.addEventListener('select', onScreenTap);
-                scene.add(controller);
-
-                window.addEventListener('resize', onWindowResize);
-                renderer.setAnimationLoop(renderLoop);
-            } catch (err) {
-                showLog(`初期化失敗: ${err.message}`);
-            }
-        }
-
-        // 画面タップ時のイベント
-        async function onScreenTap() {
-            // 1. まだアバターがいない場合は設置する
-            if (!currentVrm) {
-                if (!reticle.visible) return;
-
-                const loader = new GLTFLoader();
-                loader.register((parser) => new VRMLoaderPlugin(parser));
-
-                loader.load(vrmUrl, async (gltf) => {
-                    try {
-                        VRMUtils.removeUnnecessaryJoints(gltf.scene);
-                        const vrm = gltf.userData.vrm;
-                        if (!vrm) return;
-                        currentVrm = vrm;
-
-                        reticle.matrix.decompose(vrm.scene.position, vrm.scene.quaternion, vrm.scene.scale);
-                        vrm.scene.scale.set(0.5, 0.5, 0.5); 
-                        
-                        scene.add(vrm.scene);
-                    } catch (vrmErr) {
-                        showLog(`変換失敗: ${vrmErr.message}`);
-                    }
-                }, null, null);
-            } 
-            // 2. すでにアバターがいる場合は、タップで手を振る！
-            else {
-                playWaveAnimation();
-            }
-        }
-
-        // 手を振るアニメーション関数
-        function playWaveAnimation() {
-            // すでに手を振っている最中なら、多重実行を防ぐために無視する
-            if (isWaving) return;
-            isWaving = true;
-
-            // ボーン（関節）の取得
-            const rightShoulder = currentVrm.humanoid.getRawBoneNode('rightUpperArm');
-            const rightElbow = currentVrm.humanoid.getRawBoneNode('rightLowerArm');
-
-            if (!rightShoulder || !rightElbow) {
-                isWaving = false;
-                return;
-            }
-
-            // アニメーション開始時の腕の初期位置（少し右手を上げる）
-            rightShoulder.rotation.z = -1.2; 
-            rightShoulder.rotation.x = 0.3;
-
-            const startTime = Date.now();
-
-            const animate = () => {
-                const elapsed = (Date.now() - startTime) / 1000; // 秒数に変換
-
-                if (elapsed < 3.0) { // 3秒間手を振る
-                    // Math.sinを使って肘をキュッキュッと左右に振る（数字を大きくすると早くなります）
-                    rightElbow.rotation.x = Math.sin(elapsed * 12) * 0.4;
-                    requestAnimationFrame(animate);
-                } else {
-                    // 3秒経ったら自然な姿勢（気をつけ）に戻す
-                    rightShoulder.rotation.z = 0;
-                    rightShoulder.rotation.x = 0;
-                    rightElbow.rotation.x = 0;
-                    isWaving = false; // 再びタップ可能にする
-                }
-            };
-
-            animate();
-        }
-
-        function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        }
-
-        function renderLoop(timestamp, frame) {
-            if (frame) {
-                const referenceSpace = renderer.xr.getReferenceSpace();
-                const session = renderer.xr.getSession();
-
-                if (hitTestSourceRequested === false) {
-                    session.requestReferenceSpace('viewer').then((viewerSpace) => {
-                        session.requestHitTestSource({ space: viewerSpace }).then((source) => {
-                            hitTestSource = source;
-                        });
-                    });
-                    session.addEventListener('end', () => {
-                        hitTestSourceRequested = false;
-                        hitTestSource = null;
-                    });
-                    hitTestSourceRequested = true;
-                }
-
-                if (hitTestSource) {
-                    const hitTestResults = frame.getHitTestResults(hitTestSource);
-                    if (hitTestResults.length > 0) {
-                        const hit = hitTestResults[0];
-                        reticle.visible = true;
-                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
-                    } else {
-                        reticle.visible = false;
-                    }
-                }
-            }
-
-            // VRMのまばたきや視線などの内部アップデート
-            if (currentVrm) {
-                currentVrm.update(0.016);
-            }
-
-            renderer.render(scene, camera);
-        }
-    </script>
+const controller=renderer.xr.getController(0);
+controller.addEventListener('select',()=>{
+ if(!vrm){message('モデルの読み込みを待ってね');return}
+ if(!reticle.visible){message('地面を映して緑の輪が出たらタップしてね');return}
+ const position=new THREE.Vector3(),quaternion=new THREE.Quaternion(),scale=new THREE.Vector3();
+ reticle.matrix.decompose(position,quaternion,scale);
+ modelRoot.position.copy(position);modelRoot.quaternion.copy(quaternion);modelRoot.scale.setScalar(.5);
+ placed=true;message('配置できたよ！ ポーズを切り替えてみてね');
+});scene.add(controller);
+const arButton=ARButton.createButton(renderer,{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:document.body}});
+document.querySelector('#ar-slot').append(arButton);
+renderer.xr.addEventListener('sessionstart',()=>{
+ label.style.display='none';grid.visible=false;
+ if(modelRoot)modelRoot.visible=false;
+ placed=false;hitTestSource=null;hitTestRequested=false;
+ message('地面を映して緑の輪が出たらタップ');
+});
+renderer.xr.addEventListener('sessionend',()=>{
+ label.style.display='block';grid.visible=true;reticle.visible=false;
+ if(modelRoot){modelRoot.visible=true;modelRoot.position.set(0,0,0);modelRoot.quaternion.identity();modelRoot.scale.setScalar(.75)}
+ placed=false;hitTestSource=null;hitTestRequested=false;
+ camera.position.set(0,1.2,3);message('プレビューに戻りました');
+});
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+let previousTime=null;
+renderer.setAnimationLoop((time,frame)=>{
+ const delta=previousTime===null?0:Math.min((time-previousTime)/1000,.05);previousTime=time;
+ if(frame){
+  const session=renderer.xr.getSession(),ref=renderer.xr.getReferenceSpace();
+  if(session&&!hitTestRequested){
+   hitTestRequested=true;
+   session.requestReferenceSpace('viewer').then(space=>session.requestHitTestSource({space})).then(source=>{hitTestSource=source}).catch(e=>error('Hit Test失敗: '+e.message));
+  }
+  reticle.visible=false;
+  if(hitTestSource&&ref){
+   const hits=frame.getHitTestResults(hitTestSource);
+   if(hits.length){const pose=hits[0].getPose(ref);if(pose){reticle.visible=true;reticle.matrix.fromArray(pose.transform.matrix)}}
+  }
+  if(modelRoot)modelRoot.visible=placed;
+ }
+ if(vrm)vrm.update(delta);
+ renderer.render(scene,camera);
+});
+</script>
 </body>
 </html>
